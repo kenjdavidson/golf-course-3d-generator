@@ -31,6 +31,10 @@ from __future__ import annotations
 import sys
 
 import click
+import numpy as np
+from pyproj import Transformer
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as shapely_transform
 
 from .course_fetcher import CourseFetcher
 from .dtm_processor import DTMProcessor
@@ -216,8 +220,31 @@ def generate_all(
 
 
 # ---------------------------------------------------------------------------
-# Internal helper
+# Internal helpers
 # ---------------------------------------------------------------------------
+
+def _buffer_wgs84_geometry(geometry: BaseGeometry, buffer_m: float) -> BaseGeometry:
+    """Return *geometry* buffered by *buffer_m* metres using a UTM projection.
+
+    The geometry is temporarily reprojected to a locally appropriate UTM zone
+    (derived from its centroid), buffered there in metres, then projected back
+    to WGS-84 (EPSG:4326).  This avoids the latitude-dependent inaccuracy of a
+    simple degree-based buffer.
+    """
+    centroid = geometry.centroid
+    lon, lat = centroid.x, centroid.y
+    # Select the appropriate UTM zone
+    utm_zone = int((lon + 180) / 6) + 1
+    hemisphere = "north" if lat >= 0 else "south"
+    utm_crs = f"+proj=utm +zone={utm_zone} +{hemisphere} +datum=WGS84"
+
+    to_utm = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
+    to_wgs84 = Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
+
+    geom_utm = shapely_transform(to_utm.transform, geometry)
+    buffered_utm = geom_utm.buffer(buffer_m)
+    return shapely_transform(to_wgs84.transform, buffered_utm)
+
 
 def _process_and_export(
     dtm_path: str,
@@ -232,15 +259,18 @@ def _process_and_export(
     """End-to-end pipeline: clip DTM → build mesh → export."""
     click.echo(f"  Clipping DTM to {label} boundary (buffer={buffer_m} m) …")
 
-    buffered = geometry.buffer(buffer_m / 111_320)  # rough degrees approximation
+    # Buffer in degrees using a CRS-aware helper that reprojects to UTM,
+    # applies the metric buffer, then reprojects back to WGS-84.
+    buffered = _buffer_wgs84_geometry(geometry, buffer_m)
 
     with DTMProcessor(dtm_path) as proc:
         elevation, transform = proc.clip_to_geometry(buffered)
 
+    elev_min = float(np.nanmin(elevation)) if not np.all(np.isnan(elevation)) else 0.0
+    elev_max = float(np.nanmax(elevation)) if not np.all(np.isnan(elevation)) else 0.0
     click.echo(
         f"  Elevation grid: {elevation.shape[0]}×{elevation.shape[1]}, "
-        f"range [{float(elevation[~(elevation != elevation)].min() if (elevation != elevation).any() else elevation.min()):.1f} – "
-        f"{float(elevation.max()):.1f}]"
+        f"range [{elev_min:.1f} – {elev_max:.1f}]"
     )
 
     generator = MeshGenerator(
