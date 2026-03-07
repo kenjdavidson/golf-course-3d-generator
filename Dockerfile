@@ -39,8 +39,11 @@ WORKDIR /app
 # Copy source code
 COPY src/ ./src/
 
-# Mount points that users are expected to bind-mount
-VOLUME ["/data", "/output"]
+# Mount points that users are expected to bind-mount:
+#   /data   – place your GeoTIFF DTM/DEM files here (read-only is fine)
+#   /output – generated STL / OBJ files are written here
+VOLUME /data
+VOLUME /output
 
 # Default entrypoint – users supply the sub-command and flags
 ENTRYPOINT ["python", "-m", "src.main"]

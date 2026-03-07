@@ -1,8 +1,78 @@
 """
 DTM (Digital Terrain Model) processor.
 
-Reads GeoTIFF elevation rasters and extracts clipped elevation arrays
-for a given geographic region.
+Overview
+--------
+This module provides :class:`DTMProcessor`, which opens a GeoTIFF
+elevation raster (DEM / DTM), optionally reprojects a clipping geometry
+into the raster's coordinate reference system (CRS), and returns a
+NumPy elevation array ready for mesh generation.
+
+Required input files
+--------------------
+A **GeoTIFF** file containing single-band floating-point (or integer)
+elevation data in metres.  Any coordinate reference system supported by
+GDAL is accepted; the processor re-projects query geometries into the
+raster's native CRS automatically.
+
+Where to obtain DTM data
+------------------------
+Several free, global or regional datasets are available:
+
+* **USGS 3DEP (USA)** – 1-m and 1/3 arc-second resolution.
+  Download via the National Map: https://apps.nationalmap.gov/downloader/
+
+* **Copernicus DEM** – 30-m global coverage from the EU Space Programme.
+  https://spacedata.copernicus.eu/
+
+* **OpenTopography** – aggregates many public LiDAR and SRTM datasets.
+  https://opentopography.org/
+
+* **SRTM (NASA)** – 30-m global coverage, available on many mirror sites.
+
+Place the downloaded ``.tif`` file in the ``data/`` directory of this
+project (bind-mounted to ``/data`` inside the Docker container).
+
+Example usage
+-------------
+Using the context manager (recommended)::
+
+    from src.dtm_processor import DTMProcessor
+    from shapely.geometry import box
+
+    # A polygon covering the golf hole plus a surrounding buffer
+    hole_geom = box(-74.005, 40.701, -74.001, 40.709)
+
+    with DTMProcessor("/data/terrain.tif") as proc:
+        print(proc.crs)           # e.g. EPSG:4326
+        print(proc.bounds)        # BoundingBox(left=…, bottom=…, …)
+        elevation, transform = proc.clip_to_geometry(hole_geom)
+        # elevation: np.ndarray, shape (rows, cols), values in metres
+        # transform: rasterio Affine mapping pixels → CRS coordinates
+
+Using a WGS-84 bounding box shortcut::
+
+    with DTMProcessor("/data/terrain.tif") as proc:
+        elevation, transform = proc.clip_to_bounds(
+            (-74.01, 40.69, -73.99, 40.73)  # (west, south, east, north)
+        )
+
+Manual open / close (useful when keeping the file open across many clips)::
+
+    proc = DTMProcessor("/data/terrain.tif")
+    proc.open()
+    try:
+        elev, tf = proc.clip_to_geometry(geom)
+    finally:
+        proc.close()
+
+Notes
+-----
+* Pixels that fall outside the clip geometry or that carry the raster's
+  ``nodata`` value are replaced with ``np.nan`` in the returned array.
+* The geometry passed to :meth:`clip_to_geometry` is assumed to be in
+  ``EPSG:4326`` (WGS-84 lon/lat) by default.  Pass a different
+  ``geometry_crs`` string if your geometry is in another CRS.
 """
 
 from __future__ import annotations
@@ -19,7 +89,23 @@ from shapely.geometry.base import BaseGeometry
 
 
 class DTMProcessor:
-    """Load and query a GeoTIFF DTM raster."""
+    """Load and query a GeoTIFF DTM raster.
+
+    Parameters
+    ----------
+    dtm_path:
+        Absolute or relative path to a GeoTIFF elevation file.  Inside the
+        Docker container this is typically ``/data/<filename>.tif`` because
+        the ``data/`` directory is bind-mounted to ``/data`` (read-only).
+
+    Examples
+    --------
+    >>> from shapely.geometry import box
+    >>> with DTMProcessor("/data/terrain.tif") as proc:
+    ...     elevation, transform = proc.clip_to_geometry(
+    ...         box(-74.005, 40.701, -74.001, 40.709)
+    ...     )
+    """
 
     def __init__(self, dtm_path: str) -> None:
         self.dtm_path = dtm_path
