@@ -24,6 +24,7 @@ data/*.tif
 data/*.tiff
 data/*.hgt
 data/*.asc
+data/*.zip
 
 # OS
 .DS_Store

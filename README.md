@@ -42,6 +42,11 @@ Download a GeoTIFF covering your golf course from any public source, e.g.
 - **USGS 3DEP** – <https://apps.nationalmap.gov/downloader/>
 - **Copernicus DEM** – <https://spacedata.copernicus.eu/>
 - **OpenTopography** – <https://opentopography.org/>
+- **Natural Resources Canada (GeoGratis)** – <https://maps.canada.ca/czs/index-en.html>  
+  Select *Digital Elevation* → *CDEM* (Canadian DEM, 20 m) or *HRDEM* (High-Resolution DEM, 1 m where available).
+- **Ontario GeoHub (LiDAR-derived DEM)** – <https://geohub.lio.gov.on.ca/>  
+  Search for *"Digital Elevation Model"* or *"LiDAR"*; Ontario Ministry of Natural Resources provides
+  1-m resolution tiles for most of the province.
 
 Place the file in the `data/` directory:
 
@@ -49,6 +54,21 @@ Place the file in the `data/` directory:
 data/
 └── terrain.tif
 ```
+
+> **Multiple tiles / province-wide data**  
+> Large regions (e.g. Ontario) are often distributed as many individual tiles.  
+> The pipeline currently accepts a **single GeoTIFF**; merge your tiles before
+> running using one of the following GDAL utilities (both are included in the
+> Docker image):
+>
+> ```bash
+> # Option A – mosaic tiles into one GeoTIFF
+> gdal_merge.py -o data/ontario_merged.tif data/tile_*.tif
+>
+> # Option B – build a lightweight Virtual Raster (no file copy needed)
+> gdalbuildvrt data/ontario.vrt data/tile_*.tif
+> # Then pass data/ontario.vrt as the --dtm argument; rasterio reads VRT natively.
+> ```
 
 ### 2. Find the OSM way ID
 
@@ -150,11 +170,17 @@ golf-course-3d-generator/
 ├── requirements.txt
 ├── src/
 │   ├── __init__.py
-│   ├── main.py            # Click CLI
+│   ├── main.py            # Click CLI entry point (registers sub-commands)
+│   ├── pipeline.py        # Core pipeline: buffer + clip + mesh + export
 │   ├── dtm_processor.py   # GeoTIFF loading & clipping
 │   ├── course_fetcher.py  # OpenStreetMap Overpass queries
 │   ├── mesh_generator.py  # Elevation → watertight 3-D mesh
-│   └── exporter.py        # STL / OBJ export
+│   ├── exporter.py        # STL / OBJ export
+│   └── commands/
+│       ├── __init__.py
+│       ├── options.py      # Shared Click option decorators
+│       ├── generate.py     # `generate` sub-command
+│       └── generate_all.py # `generate-all` sub-command
 ├── tests/
 │   ├── test_dtm_processor.py
 │   ├── test_mesh_generator.py
