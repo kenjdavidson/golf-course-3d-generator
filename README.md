@@ -7,25 +7,28 @@
 
 ## Overview
 
-This Docker-based tool takes a **GeoTIFF elevation raster** (DTM/DEM) and
-golf hole geometry from **OpenStreetMap** and produces a watertight **STL**
-(or OBJ) mesh ready to send to a 3D printer.  The intended output is a
-commemorative *Hole in One* plaque or desk ornament that captures the real
-terrain of a par-3 hole.
+This Docker-based tool takes a **directory of DTM tile files** and golf hole
+geometry from **OpenStreetMap** and produces three watertight **STL** meshes
+ready for multi-material 3D printing.  The intended output is a commemorative
+*Hole in One* plaque or desk ornament that captures the real terrain of a
+par-3 hole.
 
 ```
-DTM (GeoTIFF)  ──┐
-                  ├──► clip ──► mesh ──► STL
-OSM hole data ───┘
+DTM tiles ─► VRT index ─┐
+                          ├──► clip ──► mesh layers ──► STL × 3
+OSM hole data ────────────┘
 ```
 
 ### Key features
 
 | Feature | Detail |
 |---------|--------|
-| Input formats | GeoTIFF DTM/DEM (any CRS supported by GDAL) |
+| Input | Directory of DTM tile files (`.img`, `.tif`, etc.) |
+| Output format | STL (three layer files) |
+| Multi-tile indexing | `index.vrt` built automatically with `gdalbuildvrt` |
+| Coordinate crop | `--lat` / `--lon` selects a 200 m × 200 m study area |
 | Golf course data | OpenStreetMap Overpass API (automatic) |
-| Output formats | **STL**, OBJ |
+| Layered output | Three STLs for multi-material / filament-swap printing |
 | Vertical exaggeration | Configurable `--z-scale` |
 | Print-bed sizing | `--target-size` rescales to a given mm dimension |
 | Solid base | Configurable `--base-thickness` for a printable solid |
@@ -35,9 +38,9 @@ OSM hole data ───┘
 
 ## Quick start (Docker)
 
-### 1. Obtain a DTM file
+### 1. Obtain DTM tile files
 
-Download a GeoTIFF covering your golf course from any public source, e.g.
+Download a package of elevation tiles covering your golf course, e.g.
 
 - **USGS 3DEP** – <https://apps.nationalmap.gov/downloader/>
 - **Copernicus DEM** – <https://spacedata.copernicus.eu/>
@@ -46,29 +49,21 @@ Download a GeoTIFF covering your golf course from any public source, e.g.
   Select *Digital Elevation* → *CDEM* (Canadian DEM, 20 m) or *HRDEM* (High-Resolution DEM, 1 m where available).
 - **Ontario GeoHub (LiDAR-derived DEM)** – <https://geohub.lio.gov.on.ca/>  
   Search for *"Digital Elevation Model"* or *"LiDAR"*; Ontario Ministry of Natural Resources provides
-  1-m resolution tiles for most of the province.
+  0.5 m – 1 m resolution tiles for most of the province (e.g. the Milton Package with 249 `.img` files).
 
-Place the file in the `data/` directory:
+Place the tile files in a subdirectory of `data/`:
 
 ```
 data/
-└── terrain.tif
+└── milton/
+    ├── tile_001.img
+    ├── tile_002.img
+    └── …  (249 tiles)
 ```
 
-> **Multiple tiles / province-wide data**  
-> Large regions (e.g. Ontario) are often distributed as many individual tiles.  
-> The pipeline currently accepts a **single GeoTIFF**; merge your tiles before
-> running using one of the following GDAL utilities (both are included in the
-> Docker image):
->
-> ```bash
-> # Option A – mosaic tiles into one GeoTIFF
-> gdal_merge.py -o data/ontario_merged.tif data/tile_*.tif
->
-> # Option B – build a lightweight Virtual Raster (no file copy needed)
-> gdalbuildvrt data/ontario.vrt data/tile_*.tif
-> # Then pass data/ontario.vrt as the --dtm argument; rasterio reads VRT natively.
-> ```
+An `index.vrt` is created automatically in the same directory the first time
+you run the tool.  If the directory contains only a single tile file that is
+fine too — the VRT simply wraps that one tile.
 
 ### 2. Find the OSM way ID
 
@@ -82,24 +77,40 @@ data/
 # Build the image (first time only)
 docker compose build
 
-# Generate a single par-3 hole
+# Generate a single par-3 hole (3 STL layers)
 docker compose run --rm generator generate \
-    --dtm /data/terrain.tif \
+    --dtm-dir /data/milton \
     --hole-id 123456789 \
-    --output /output/hole3.stl
-
-# The STL file will be written to ./output/hole3.stl
+    --lat 43.5123 --lon -79.8765 \
+    --output /output/hole3_layers
 ```
+
+The output directory contains:
+
+| File | 3D Print purpose |
+|------|-----------------|
+| `base_terrain.stl` | Main structural body |
+| `green_inlay.stl` | Green / tee colour insert |
+| `bunker_cutout.stl` | Sand / bunker filament inlay |
+
+Import all three into Bambu Studio or PrusaSlicer as a **multi-part object**
+and assign a different filament to each part.
+
+Pass `--output /output/hole3_layers.zip` to receive a single ZIP archive
+instead of a directory.
 
 ### 4. Generate all par-3 holes near a coordinate
 
 ```bash
 docker compose run --rm generator generate-all \
-    --dtm /data/terrain.tif \
-    --lat 40.7128 --lon -74.0060 \
+    --dtm-dir /data/milton \
+    --lat 43.5123 --lon -79.8765 \
     --radius 3000 \
     --output-dir /output
 ```
+
+Each hole found produces a subdirectory (e.g. `hole-3/`) containing its
+three STL files.
 
 ---
 
@@ -119,25 +130,29 @@ Commands:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dtm PATH` | *required* | GeoTIFF DTM/DEM raster file |
+| `--dtm-dir PATH` | *required* | Directory of DTM tile files; `index.vrt` built automatically |
+| `--lat FLOAT` | *required* | Latitude of study-area centre (WGS-84) |
+| `--lon FLOAT` | *required* | Longitude of study-area centre (WGS-84) |
 | `--hole-id INT` | *required* | OpenStreetMap way ID (`golf=hole`) |
 | `--buffer FLOAT` | `50` | Buffer in metres around the hole boundary |
 | `--base-thickness FLOAT` | `3.0` | Solid base thickness (metres) |
 | `--z-scale FLOAT` | `1.5` | Vertical exaggeration factor |
 | `--target-size FLOAT` | *none* | Rescale longest XY dimension to this mm value |
-| `--output PATH` | `hole.stl` | Output file (`.stl` or `.obj`) |
+| `--output PATH` | `hole_layers` | Output directory or `.zip` path for the three layer STLs |
 
 ### `generate-all` options
 
-All of the above plus:
-
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--lat FLOAT` | *required* | Latitude of search centre |
-| `--lon FLOAT` | *required* | Longitude of search centre |
+| `--dtm-dir PATH` | *required* | Directory of DTM tile files; `index.vrt` built automatically |
+| `--lat FLOAT` | *required* | Latitude of search centre (WGS-84) |
+| `--lon FLOAT` | *required* | Longitude of search centre (WGS-84) |
 | `--radius FLOAT` | `5000` | Search radius in metres |
-| `--output-dir PATH` | `output` | Directory for output files |
-| `--format {stl,obj}` | `stl` | Output file format |
+| `--buffer FLOAT` | `50` | Buffer in metres around each hole boundary |
+| `--base-thickness FLOAT` | `3.0` | Solid base thickness (metres) |
+| `--z-scale FLOAT` | `1.5` | Vertical exaggeration factor |
+| `--target-size FLOAT` | *none* | Rescale longest XY dimension to this mm value |
+| `--output-dir PATH` | `output` | Parent directory; each hole gets its own subdirectory |
 
 ---
 
@@ -150,11 +165,19 @@ sudo apt-get install gdal-bin libgdal-dev libspatialindex-dev
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Run
+# Generate a single hole
 python -m src.main generate \
-    --dtm data/terrain.tif \
+    --dtm-dir data/milton \
     --hole-id 123456789 \
-    --output output/hole.stl
+    --lat 43.5123 --lon -79.8765 \
+    --output output/hole_layers
+
+# Generate all par-3 holes near a coordinate
+python -m src.main generate-all \
+    --dtm-dir data/milton \
+    --lat 43.5123 --lon -79.8765 \
+    --radius 5000 \
+    --output-dir output
 ```
 
 ---
@@ -172,10 +195,11 @@ golf-course-3d-generator/
 │   ├── __init__.py
 │   ├── main.py            # Click CLI entry point (registers sub-commands)
 │   ├── pipeline.py        # Core pipeline: buffer + clip + mesh + export
-│   ├── dtm_processor.py   # GeoTIFF loading & clipping
+│   ├── dtm_processor.py   # VRT / GeoTIFF loading & clipping
+│   ├── vrt_builder.py     # Multi-tile VRT index builder (gdalbuildvrt)
 │   ├── course_fetcher.py  # OpenStreetMap Overpass queries
-│   ├── mesh_generator.py  # Elevation → watertight 3-D mesh
-│   ├── exporter.py        # STL / OBJ export
+│   ├── mesh_generator.py  # Elevation → watertight 3-D mesh (+ layer support)
+│   ├── exporter.py        # STL / OBJ / ZIP export
 │   └── commands/
 │       ├── __init__.py
 │       ├── options.py      # Shared Click option decorators
@@ -184,10 +208,12 @@ golf-course-3d-generator/
 ├── tests/
 │   ├── test_dtm_processor.py
 │   ├── test_mesh_generator.py
+│   ├── test_mesh_generator_layers.py
+│   ├── test_vrt_builder.py
 │   ├── test_course_fetcher.py
 │   └── test_exporter.py
-├── data/      # Place your DTM GeoTIFFs here (not committed)
-└── output/    # Generated STL / OBJ files (not committed)
+├── data/      # Place your DTM tile directories here (not committed)
+└── output/    # Generated STL files (not committed)
 ```
 
 ### Running tests
@@ -207,23 +233,30 @@ python -m pytest tests/ -v
 
 ## Pipeline details
 
-1. **DTM Processor** (`src/dtm_processor.py`)  
-   Opens a GeoTIFF with `rasterio`, reprojects the hole geometry into the
+1. **VRT Builder** (`src/vrt_builder.py`)  
+   Scans the tile directory for `.img` (or `.tif`) files and runs
+   `gdalbuildvrt -overwrite` to create `index.vrt`.  An existing VRT is
+   reused on subsequent runs without rebuilding.
+
+2. **DTM Processor** (`src/dtm_processor.py`)  
+   Opens the VRT with `rasterio`, reprojects the hole geometry into the
    raster's CRS, and returns a clipped NumPy elevation array.
 
-2. **Course Fetcher** (`src/course_fetcher.py`)  
+3. **Course Fetcher** (`src/course_fetcher.py`)  
    Queries the OpenStreetMap Overpass API for `golf=hole` ways tagged
    `par=3`.  Returns Shapely polygons in WGS-84.
 
-3. **Mesh Generator** (`src/mesh_generator.py`)  
-   Converts the elevation grid to a watertight trimesh solid:
-   - Surface: two triangles per grid cell
-   - Side walls: perimeter extruded to a flat base plane
-   - Bottom cap: fan triangulation
-   - Optional vertical exaggeration and print-bed rescaling
+4. **Mesh Generator** (`src/mesh_generator.py`)  
+   Converts the elevation grid to three watertight trimesh solids via
+   `generate_layers()`:
+   - *base_terrain*: full terrain (structural body).
+   - *green_inlay*: flat elevated plateaus (low slope + Z ≥ median).
+   - *bunker_cutout*: local depressions (Z < median − 0.5 × std).
 
-4. **Exporter** (`src/exporter.py`)  
-   Writes the mesh to STL (default) or OBJ using `trimesh`.
+5. **Exporter** (`src/exporter.py`)  
+   Writes the three layer meshes to disk:
+   - `export_layers_to_dir()` – three `<name>.stl` files in a directory.
+   - `export_layers_to_zip()` – a single ZIP archive containing the three STLs.
 
 ---
 

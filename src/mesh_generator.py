@@ -3,6 +3,14 @@ Mesh generator.
 
 Converts a 2-D elevation array (from DTM) into a watertight 3-D mesh
 suitable for 3D printing (solid base included).
+
+For multi-material / filament-swap printing the :meth:`MeshGenerator.generate_layers`
+method returns three separate :class:`trimesh.Trimesh` objects that can be
+imported as a multi-part object into slicers like Bambu Studio or PrusaSlicer:
+
+* ``base_terrain`` – full terrain surface (structural body)
+* ``green_inlay``  – isolated flat-plateau regions (greens / tee areas)
+* ``bunker_cutout``– isolated depression regions (bunker / sand areas)
 """
 
 from __future__ import annotations
@@ -153,6 +161,80 @@ class MeshGenerator:
             mesh.vertices *= scale
 
         return mesh
+
+    # ------------------------------------------------------------------
+    # Layered generation (multi-material 3D printing)
+    # ------------------------------------------------------------------
+
+    def generate_layers(
+        self,
+        elevation: np.ndarray,
+        transform: rasterio.transform.Affine,
+    ) -> dict[str, trimesh.Trimesh]:
+        """Generate three terrain layer meshes for multi-material 3D printing.
+
+        The three layers are identified by thresholding the elevation (Z)
+        values relative to the median terrain height and the local slope:
+
+        ``base_terrain``
+            The complete terrain surface – identical to calling
+            :meth:`generate`.  This is the structural body of the print.
+
+        ``green_inlay``
+            Localized flat plateaus at or above the median elevation.
+            Detected by a low slope (≤ 25th percentile) **and** elevation
+            ≥ median.  Suitable for a contrasting "green / tee" filament
+            colour.
+
+        ``bunker_cutout``
+            Localized depressions below ``median − 0.5 × std``.  Suitable
+            for a "sand" filament inlay or recessed colour insert.
+
+        For the inlay and cutout meshes the non-qualifying pixels are filled
+        with the grid minimum (i.e. they become a flat base), so each mesh
+        is a full watertight solid and can be directly imported into any
+        slicer.
+
+        Parameters
+        ----------
+        elevation:
+            2-D float array of elevation values (rows × cols).
+        transform:
+            Rasterio affine transform mapping (col, row) → (x, y).
+
+        Returns
+        -------
+        dict
+            Mapping with keys ``"base_terrain"``, ``"green_inlay"``, and
+            ``"bunker_cutout"``, each holding a :class:`trimesh.Trimesh`.
+        """
+        filled = self._fill_nan(elevation)
+
+        median_z = float(np.median(filled))
+        std_z = float(np.std(filled))
+
+        # Slope (gradient magnitude) in elevation-grid units per pixel.
+        grad_y, grad_x = np.gradient(filled)
+        slope = np.sqrt(grad_x ** 2 + grad_y ** 2)
+        low_slope_thresh = float(np.percentile(slope.ravel(), 25))
+
+        # Green / tee mask: low slope AND at-or-above median elevation.
+        green_mask = (slope <= low_slope_thresh) & (filled >= median_z)
+
+        # Bunker mask: below median minus half a standard deviation.
+        bunker_thresh = median_z - 0.5 * std_z
+        bunker_mask = filled < bunker_thresh
+
+        # Build masked elevation arrays; NaN outside the mask so that
+        # generate() fills those pixels with the grid minimum (flat base).
+        green_elev = np.where(green_mask, filled, np.nan)
+        bunker_elev = np.where(bunker_mask, filled, np.nan)
+
+        return {
+            "base_terrain": self.generate(elevation, transform),
+            "green_inlay": self.generate(green_elev, transform),
+            "bunker_cutout": self.generate(bunker_elev, transform),
+        }
 
     # ------------------------------------------------------------------
     # Coordinate grid construction
