@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated 3D model output (bind-mounted at runtime)
+output/*.stl
+output/*.obj
+
+# DTM / raster input data (large binary files; user-provided)
+data/*.tif
+data/*.tiff
+data/*.hgt
+data/*.asc
+data/*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
