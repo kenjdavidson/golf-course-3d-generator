@@ -5,18 +5,16 @@ This module wires together the four processing stages:
 
 1. :func:`buffer_wgs84_geometry` – expand a WGS-84 polygon outward by a
    metric distance using a UTM reprojection.
-2. :class:`~src.dtm_processor.DTMProcessor` – clip the GeoTIFF (or VRT)
-   raster to the buffered geometry.
+2. :class:`~src.dtm_processor.DTMProcessor` – clip the VRT raster to the
+   buffered geometry.
 3. :class:`~src.mesh_generator.MeshGenerator` – convert the elevation grid
-   to a watertight 3-D mesh.
-4. :class:`~src.exporter.Exporter` – write the mesh (or layer pack) to disk.
+   to a set of watertight 3-D meshes.
+4. :class:`~src.exporter.Exporter` – write the layer pack to disk.
 
-Two top-level entry points are provided:
-
-* :func:`run_pipeline` – single-STL output (backward-compatible).
-* :func:`run_layered_pipeline` – multi-tile VRT workflow that outputs three
-  STL files (``base_terrain``, ``green_inlay``, ``bunker_cutout``) to a
-  directory or ``.zip`` archive.
+The single top-level entry point is :func:`run_layered_pipeline`, which
+accepts a directory of DTM tile files, builds a VRT index automatically,
+crops to a 200 m × 200 m study area, and outputs three STL files:
+``base_terrain``, ``green_inlay``, and ``bunker_cutout``.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shapely_transform
 
 from .dtm_processor import DTMProcessor
-from .exporter import ExportFormat, Exporter
+from .exporter import Exporter
 from .mesh_generator import MeshGenerator
 from .vrt_builder import VRTBuilder
 
@@ -97,63 +95,6 @@ def _coordinate_to_study_area(lat: float, lon: float) -> BaseGeometry:
     return buffered.envelope
 
 
-def run_pipeline(
-    dtm_path: str,
-    geometry: BaseGeometry,
-    buffer_m: float,
-    base_thickness: float,
-    z_scale: float,
-    target_size_mm: float | None,
-    output_path: str,
-    label: str,
-) -> None:
-    """Execute the full DTM-clip → mesh-build → export pipeline.
-
-    Parameters
-    ----------
-    dtm_path:
-        Path to the GeoTIFF (or VRT) DTM file.
-    geometry:
-        Shapely polygon for the golf hole in WGS-84 coordinates.
-    buffer_m:
-        Metric buffer to add around *geometry* before clipping the DTM.
-    base_thickness:
-        Solid base depth (metres) added below the terrain surface.
-    z_scale:
-        Vertical exaggeration factor applied to terrain relief.
-    target_size_mm:
-        When set, the mesh is rescaled so its longest XY dimension equals
-        this many millimetres.
-    output_path:
-        Destination file path for the generated STL/OBJ mesh.
-    label:
-        Human-readable label used in progress messages.
-    """
-    click.echo(f"  Clipping DTM to {label} boundary (buffer={buffer_m} m) …")
-
-    buffered = buffer_wgs84_geometry(geometry, buffer_m)
-
-    with DTMProcessor(dtm_path) as proc:
-        elevation, transform = proc.clip_to_geometry(buffered)
-
-    elev_min = float(np.nanmin(elevation)) if not np.all(np.isnan(elevation)) else 0.0
-    elev_max = float(np.nanmax(elevation)) if not np.all(np.isnan(elevation)) else 0.0
-    click.echo(
-        f"  Elevation grid: {elevation.shape[0]}×{elevation.shape[1]}, "
-        f"range [{elev_min:.1f} – {elev_max:.1f}]"
-    )
-
-    mesh = MeshGenerator(
-        base_thickness=base_thickness,
-        z_scale=z_scale,
-        target_size_mm=target_size_mm,
-    ).generate(elevation, transform)
-
-    fmt = ExportFormat.from_path(output_path)
-    Exporter().export(mesh, output_path, fmt=fmt)
-    click.echo(f"  ✓ Saved → {output_path}")
-
-
 def run_layered_pipeline(
     dtm_dir: str,
     geometry: BaseGeometry,
@@ -171,7 +112,7 @@ def run_layered_pipeline(
     Workflow
     --------
     1. :class:`~src.vrt_builder.VRTBuilder` builds (or reuses) ``index.vrt``
-       from the ``.img`` files in *dtm_dir*.
+       from the tile files in *dtm_dir*.
     2. A 200 m × 200 m study-area bounding box is derived from *lat* / *lon*
        and intersected with the hole geometry / buffer.
     3. The elevation grid is clipped from the VRT using
@@ -185,7 +126,7 @@ def run_layered_pipeline(
     Parameters
     ----------
     dtm_dir:
-        Directory containing ``.img`` tile files.
+        Directory containing DTM tile files (e.g. ``.img`` or ``.tif``).
     geometry:
         Shapely polygon for the golf hole in WGS-84 coordinates.
     lat:
