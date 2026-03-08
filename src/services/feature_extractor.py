@@ -3,23 +3,42 @@
 Identifies golf-course features directly from raw elevation data without
 requiring OpenStreetMap hole-outline geometry.
 
-Two feature types are detected:
+Two feature types are detected using a **Laplacian of Gaussian (LoG)**
+filter (``scipy.ndimage.gaussian_laplace``):
 
 ``green / tee`` (plateau regions)
-    Contiguous flat areas at or above the median elevation.  Flatness is
-    measured by the gradient magnitude; only pixels below the
-    ``slope_percentile`` threshold are considered candidates.  Connected
-    components smaller than ``min_region_pixels`` are discarded as noise.
+    A LoG filter highlights convex terrain features (local maxima such as
+    elevated greens and tee boxes) as strongly **negative** values.  A
+    pixel qualifies as a green/tee candidate when:
+
+    * Its LoG response is in the bottom ``slope_percentile`` of the array
+      (strongly convex / peaked), **and**
+    * Its slope angle is below ``green_slope_max_deg`` (≤ 3° by default),
+      confirming it is a *flat* elevated area rather than a steep ridge.
+
+    Connected components smaller than ``min_region_pixels`` are discarded
+    as noise (``skimage.measure.label`` + ``regionprops``).
 
 ``bunker`` (depression regions)
-    Local minima revealed by a morphological *bottom-hat* transform
-    (grey closing − original).  Only depressions that also fall below
-    ``median − 0.5 × std`` are retained.  Again, tiny components are
-    filtered out.
+    A LoG filter returns strongly **positive** values at concave terrain
+    features (local minima, i.e. bunker-like pits).  A pixel qualifies as
+    a bunker candidate when:
 
-Libraries used:
+    * Its LoG response is in the top ``slope_percentile`` of the array
+      (strongly concave / pit-like), **and**
+    * Its elevation is below ``median − 0.5 × std``, confirming the pixel
+      sits in a genuine depression relative to the surrounding terrain.
 
-* **NumPy / SciPy** – gradient computation and morphological transforms.
+    Small components are discarded with the same connected-component filter.
+
+The Gaussian smoothing controlled by *sigma* suppresses high-frequency
+noise (rocks, long grass) before the Laplacian is computed, so ``sigma=2``
+corresponds to roughly a 2-pixel (~1 m at 0.5 m/pixel) noise-suppression
+radius.
+
+Libraries used
+--------------
+* **NumPy / SciPy** – ``gaussian_laplace`` and ``gradient``.
 * **scikit-image** (``skimage.measure``) – connected-component labelling
   and region-property filtering.
 
@@ -37,7 +56,7 @@ Usage
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import grey_closing
+from scipy.ndimage import gaussian_laplace
 from skimage.measure import label as skimage_label, regionprops
 
 
@@ -46,26 +65,32 @@ class FeatureExtractor:
 
     Parameters
     ----------
+    sigma:
+        Standard deviation for the Gaussian part of the LoG filter.
+        Larger values suppress finer-scale noise.  Default ``2.0``.
+    green_slope_max_deg:
+        Maximum slope angle (degrees) for a pixel to qualify as a green/tee
+        plateau.  Default ``3.0`` (nearly flat).
     slope_percentile:
-        Percentile of the slope-magnitude distribution below which a pixel
-        qualifies as "flat" (green/tee candidate).  Default ``25``.
+        Percentile threshold used for both the green (bottom percentile of
+        LoG → strongly convex) and bunker (top percentile of LoG → strongly
+        concave) candidate selection.  Default ``25``.
     min_region_pixels:
         Minimum connected-component size (pixels) to retain as a feature.
         Components smaller than this are treated as noise.  Default ``10``.
-    bunker_closing_size:
-        Side length (pixels) of the square structuring element used in the
-        morphological grey closing for the bottom-hat transform.  Default ``5``.
     """
 
     def __init__(
         self,
+        sigma: float = 2.0,
+        green_slope_max_deg: float = 3.0,
         slope_percentile: float = 25.0,
         min_region_pixels: int = 10,
-        bunker_closing_size: int = 5,
     ) -> None:
+        self.sigma = sigma
+        self.green_slope_max_deg = green_slope_max_deg
         self.slope_percentile = slope_percentile
         self.min_region_pixels = min_region_pixels
-        self.bunker_closing_size = bunker_closing_size
 
     # ------------------------------------------------------------------
     # Public interface
@@ -74,9 +99,9 @@ class FeatureExtractor:
     def extract_green_mask(self, elevation: np.ndarray) -> np.ndarray:
         """Return a boolean mask of green/tee plateau regions.
 
-        Detects contiguous flat areas at or above the median elevation using
-        gradient-magnitude thresholding and connected-component labelling
-        (``skimage.measure.label``).
+        Uses the Laplacian of Gaussian (LoG) to detect convex terrain
+        features (negative LoG response) combined with a slope check to
+        confirm the area is flat.
 
         Parameters
         ----------
@@ -91,22 +116,28 @@ class FeatureExtractor:
             a pixel belongs to a green/tee plateau region.
         """
         filled = self._fill_nan(elevation)
-        median_z = float(np.median(filled))
 
+        # LoG: negative at convex features (plateaus / greens)
+        lap = gaussian_laplace(filled, sigma=self.sigma)
+        lap_thresh = float(np.percentile(lap.ravel(), self.slope_percentile))
+
+        # Slope: confirm the candidate is nearly flat.
+        # For small angles, gradient_magnitude < tan(angle) is equivalent to
+        # arctan(gradient_magnitude) < angle, avoiding an expensive arctan call.
         grad_y, grad_x = np.gradient(filled)
-        slope = np.sqrt(grad_x ** 2 + grad_y ** 2)
-        low_slope_thresh = float(np.percentile(slope.ravel(), self.slope_percentile))
+        slope_magnitude = np.hypot(grad_x, grad_y)
 
-        candidate = (slope <= low_slope_thresh) & (filled >= median_z)
+        candidate = (lap <= lap_thresh) & (
+            slope_magnitude < np.tan(np.radians(self.green_slope_max_deg))
+        )
         return self._filter_small_regions(candidate)
 
     def extract_bunker_mask(self, elevation: np.ndarray) -> np.ndarray:
         """Return a boolean mask of bunker/depression regions.
 
-        Uses a morphological *bottom-hat* transform (``grey_closing −
-        original``) to highlight local minima, then further filters by
-        requiring the pixel elevation to be below ``median − 0.5 × std``.
-        Connected components are labelled and small ones removed.
+        Uses the Laplacian of Gaussian (LoG) to detect concave terrain
+        features (positive LoG response) combined with an elevation check
+        to confirm the area is a genuine depression.
 
         Parameters
         ----------
@@ -124,13 +155,14 @@ class FeatureExtractor:
         median_z = float(np.median(filled))
         std_z = float(np.std(filled))
 
-        s = self.bunker_closing_size
-        closed = grey_closing(filled, size=(s, s))
-        bottom_hat = closed - filled
+        # LoG: positive at concave features (pits / bunkers)
+        lap = gaussian_laplace(filled, sigma=self.sigma)
+        lap_thresh = float(np.percentile(lap.ravel(), 100 - self.slope_percentile))
 
-        depth_thresh = float(np.percentile(bottom_hat.ravel(), 75))
-        bunker_thresh = median_z - 0.5 * std_z
-        candidate = (bottom_hat >= depth_thresh) & (filled < bunker_thresh)
+        # Elevation: confirm the candidate is below median terrain
+        bunker_elev_thresh = median_z - 0.5 * std_z
+
+        candidate = (lap >= lap_thresh) & (filled < bunker_elev_thresh)
         return self._filter_small_regions(candidate)
 
     # ------------------------------------------------------------------

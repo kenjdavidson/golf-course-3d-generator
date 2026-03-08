@@ -51,7 +51,20 @@ from src.commands.options import (
     mesh_options,
 )
 from src.course_fetcher import CourseFetcher
-from src.pipeline import run_layered_pipeline
+from src.generators.factory import create_generator
+
+
+def _resolve_hole(hole_id):
+    """Fetch OSM geometry for *hole_id*, or return ``(None, coord-label)``."""
+    if hole_id is None:
+        return None, None
+    click.echo(f"Fetching hole geometry for OSM way {hole_id} …")
+    fetcher = CourseFetcher()
+    geometry = fetcher.fetch_hole_by_id(hole_id)
+    if geometry is None:
+        click.echo(f"ERROR: Could not find OSM way {hole_id}.", err=True)
+        sys.exit(1)
+    return geometry, f"OSM way {hole_id}"
 
 
 def register(cli: click.Group) -> None:
@@ -103,27 +116,20 @@ def register(cli: click.Group) -> None:
         Outputs three STL files (base_terrain, green_inlay, bunker_cutout)
         to a directory or ZIP archive for multi-material 3D printing.
         """
-        geometry = None
-        label = f"lat={lat},lon={lon}"
+        geometry, osm_label = _resolve_hole(hole_id)
+        label = osm_label or f"lat={lat},lon={lon}"
 
-        if hole_id is not None:
-            click.echo(f"Fetching hole geometry for OSM way {hole_id} …")
-            fetcher = CourseFetcher()
-            geometry = fetcher.fetch_hole_by_id(hole_id)
-            if geometry is None:
-                click.echo(f"ERROR: Could not find OSM way {hole_id}.", err=True)
-                sys.exit(1)
-            label = f"OSM way {hole_id}"
-
-        run_layered_pipeline(
-            geometry=geometry,
-            lat=lat,
-            lon=lon,
-            buffer_m=buffer,
+        generator = create_generator(
+            dtm_dir=dtm_dir,
             base_thickness=base_thickness,
             z_scale=z_scale,
             target_size_mm=target_size,
+        )
+        generator.generate(
+            lat=lat,
+            lon=lon,
+            buffer_m=buffer,
             output_path=output,
             label=label,
-            dtm_dir=dtm_dir,
+            geometry=geometry,
         )

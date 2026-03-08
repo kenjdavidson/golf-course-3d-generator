@@ -40,7 +40,7 @@ import click
 
 from src.commands.options import dtm_dir_option, mesh_options
 from src.course_fetcher import CourseFetcher
-from src.pipeline import run_layered_pipeline
+from src.generators.factory import create_generator
 
 
 def register(cli: click.Group) -> None:
@@ -93,8 +93,7 @@ def register(cli: click.Group) -> None:
 
         Each hole produces a subdirectory inside OUTPUT_DIR containing three
         STL files (base_terrain, green_inlay, bunker_cutout) for multi-material
-        3D printing.  The hole's OSM centroid is used as the study-area centre
-        for the VRT crop.
+        3D printing.  The hole's OSM centroid is used as the study-area centre.
         """
         click.echo(f"Searching for par-3 holes within {radius} m of ({lat}, {lon}) …")
         fetcher = CourseFetcher()
@@ -105,6 +104,14 @@ def register(cli: click.Group) -> None:
             sys.exit(0)
 
         click.echo(f"Found {len(holes)} par-3 hole(s).")
+
+        # Create a single generator instance shared across all holes.
+        generator = create_generator(
+            dtm_dir=dtm_dir,
+            base_thickness=base_thickness,
+            z_scale=z_scale,
+            target_size_mm=target_size,
+        )
 
         for hole in holes:
             osm_id = hole["osm_id"]
@@ -122,17 +129,13 @@ def register(cli: click.Group) -> None:
                 + (f" – {name}" if name else "")
             )
             try:
-                run_layered_pipeline(
-                    geometry=hole["geometry"],
+                generator.generate(
                     lat=hole_lat,
                     lon=hole_lon,
                     buffer_m=buffer,
-                    base_thickness=base_thickness,
-                    z_scale=z_scale,
-                    target_size_mm=target_size,
                     output_path=output_path,
                     label=label,
-                    dtm_dir=dtm_dir,
+                    geometry=hole["geometry"],
                 )
             except Exception as exc:  # noqa: BLE001
                 click.echo(

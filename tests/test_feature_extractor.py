@@ -149,11 +149,11 @@ class TestExtractBunkerMask:
         mask_strict = extractor_strict.extract_bunker_mask(z)
         assert mask_strict.sum() <= mask_loose.sum()
 
-    def test_closing_size_affects_result(self):
-        """Different closing sizes should produce different (or equal) bunker masks."""
+    def test_sigma_affects_result(self):
+        """Different sigma values should produce valid bunker masks with LoG filter."""
         z = _terrain_with_plateau()
-        extractor_small = FeatureExtractor(bunker_closing_size=3, min_region_pixels=2)
-        extractor_large = FeatureExtractor(bunker_closing_size=9, min_region_pixels=2)
+        extractor_small = FeatureExtractor(sigma=1.0, min_region_pixels=2)
+        extractor_large = FeatureExtractor(sigma=4.0, min_region_pixels=2)
         mask_small = extractor_small.extract_bunker_mask(z)
         mask_large = extractor_large.extract_bunker_mask(z)
         # Both must be valid boolean masks – the actual difference is implementation-specific.
