@@ -4,13 +4,13 @@ Shared Click option decorators used by more than one command.
 Import the relevant decorators and stack them on any command function that
 needs them::
 
-    from src.commands.options import dtm_dir_option, mesh_options, coordinate_options
+    from src.commands.options import dtm_dir_option, coordinate_options, print_options
 
     @cli.command()
     @dtm_dir_option
     @coordinate_options
-    @mesh_options
-    def my_command(dtm_dir, lat, lon, buffer, base_thickness, z_scale, target_size):
+    @print_options
+    def my_command(dtm_dir, lat, lon, base_thickness, z_scale, target_size):
         ...
 """
 
@@ -20,11 +20,11 @@ import click
 
 
 def dtm_dir_option(f):
-    """Add the ``--dtm-dir`` option (path to a directory of DTM tile files).
+    """Add the ``--dtm-dir`` option (required path to a directory of DTM tile files).
 
     The directory is automatically indexed into an ``index.vrt`` Virtual
     Raster (built with ``gdalbuildvrt``) if one does not already exist.
-    Must be used together with ``--lat`` / ``--lon`` to select the study area.
+    This option is required for commands that process local DTM data.
     """
     return click.option(
         "--dtm-dir",
@@ -32,8 +32,7 @@ def dtm_dir_option(f):
         type=click.Path(exists=True, file_okay=False, dir_okay=True),
         help=(
             "Path to a directory containing DTM/DEM tile files (.img or .tif).  "
-            "An index.vrt is created automatically if absent.  "
-            "Must be combined with --lat and --lon."
+            "An index.vrt is created automatically if absent."
         ),
     )(f)
 
@@ -42,7 +41,7 @@ def coordinate_options(f):
     """Add ``--lat`` and ``--lon`` options for coordinate-based area selection.
 
     These define a 200 m × 200 m study area centred on the given WGS-84
-    coordinate and are required when ``--dtm-dir`` is used.
+    coordinate.
     """
     f = click.option(
         "--lat",
@@ -59,15 +58,12 @@ def coordinate_options(f):
     return f
 
 
-def mesh_options(f):
-    """Add the four mesh-quality options shared by all generate commands."""
-    f = click.option(
-        "--buffer",
-        default=50,
-        show_default=True,
-        type=float,
-        help="Buffer (metres) to add around the hole boundary before clipping.",
-    )(f)
+def print_options(f):
+    """Add the three mesh-quality / print-quality options shared by all generate commands.
+
+    Covers vertical scale, base thickness, and optional print-bed rescaling.
+    Each command adds its own ``--buffer`` with a purpose-appropriate default.
+    """
     f = click.option(
         "--base-thickness",
         default=3.0,
@@ -93,3 +89,24 @@ def mesh_options(f):
         ),
     )(f)
     return f
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias: mesh_options = print_options + --buffer
+# ---------------------------------------------------------------------------
+
+def mesh_options(f):
+    """Add mesh-quality options including ``--buffer`` (50 m default).
+
+    .. deprecated::
+        Prefer ``print_options`` plus an explicit ``--buffer`` option in each
+        command so the default can be tuned to the command's purpose.
+    """
+    f = click.option(
+        "--buffer",
+        default=50,
+        show_default=True,
+        type=float,
+        help="Buffer (metres) to add around the hole boundary before clipping.",
+    )(f)
+    return print_options(f)

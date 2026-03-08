@@ -1,15 +1,13 @@
 """
-``generate`` command – produce a 3D model for a single par-3 hole.
+``generate`` command – produce a 3D model for a single par-3 hole from
+a local DTM tile directory.
 
-The hole is identified by its OpenStreetMap way ID.  Find the ID by:
+Elevation data is read from a directory of DTM/DEM tile files (e.g.
+``.img`` or ``.tif``) that are automatically indexed into a GDAL Virtual
+Raster (``index.vrt``).
 
-1. Visiting https://www.openstreetmap.org/ and navigating to the course.
-2. Clicking the *Query features* tool and clicking on the hole outline.
-3. Noting the **Way ID** shown in the panel (e.g. ``123456789``).
-
-Example
--------
-::
+**With an OSM hole ID** – the hole outline is fetched from OpenStreetMap
+and used to clip the raster to the exact hole boundary::
 
     python -m src.main generate \\
         --dtm-dir /data/milton \\
@@ -19,11 +17,26 @@ Example
         --z-scale 1.5 \\
         --target-size 200
 
+**Without an OSM hole ID** – the coordinate + buffer bounding box is used
+directly, and features (greens, bunkers) are detected automatically using
+the Laplacian of Gaussian (LoG) filter::
+
+    python -m src.main generate \\
+        --dtm-dir /data/milton \\
+        --lat 43.5123 --lon -79.8765 \\
+        --buffer 150 \\
+        --output /output/hole3_layers
+
+Find the OSM hole ID by:
+
+1. Visiting https://www.openstreetmap.org/ and navigating to the course.
+2. Clicking the *Query features* tool and clicking on the hole outline.
+3. Noting the **Way ID** shown in the panel (e.g. ``123456789``).
+
 Inside Docker::
 
     docker compose run --rm generator generate \\
         --dtm-dir /data/milton \\
-        --hole-id 123456789 \\
         --lat 43.5123 --lon -79.8765 \\
         --output /output/hole3_layers
 
@@ -33,6 +46,8 @@ containing three STL files for multi-material / filament-swap printing:
 * ``base_terrain.stl`` – full terrain surface (structural body)
 * ``green_inlay.stl``  – flat elevated plateaus (greens / tee colours)
 * ``bunker_cutout.stl``– depression areas (sand / bunker filament)
+
+To generate a model without local files, see the ``generate-api`` command.
 """
 
 from __future__ import annotations
@@ -41,13 +56,9 @@ import sys
 
 import click
 
-from src.commands.options import (
-    coordinate_options,
-    dtm_dir_option,
-    mesh_options,
-)
+from src.commands.options import coordinate_options, dtm_dir_option, print_options
 from src.course_fetcher import CourseFetcher
-from src.pipeline import run_layered_pipeline
+from src.generators.vrt_generator import VRTHoleGenerator
 
 
 def register(cli: click.Group) -> None:
@@ -56,12 +67,28 @@ def register(cli: click.Group) -> None:
     @cli.command()
     @dtm_dir_option
     @coordinate_options
-    @mesh_options
+    @print_options
     @click.option(
         "--hole-id",
-        required=True,
+        required=False,
+        default=None,
         type=int,
-        help="OpenStreetMap way ID of the golf hole (golf=hole way).",
+        help=(
+            "OpenStreetMap way ID of the golf hole (golf=hole way).  "
+            "When supplied, the hole outline clips the elevation raster to the "
+            "exact hole boundary.  When omitted, the coordinate + --buffer area "
+            "is used directly and features are detected automatically."
+        ),
+    )
+    @click.option(
+        "--buffer",
+        default=50,
+        show_default=True,
+        type=float,
+        help=(
+            "Buffer (metres) added around the hole boundary before clipping.  "
+            "Also used as the study-area half-width when --hole-id is omitted."
+        ),
     )
     @click.option(
         "--output",
@@ -84,29 +111,41 @@ def register(cli: click.Group) -> None:
         target_size,
         output,
     ):
-        """Generate a 3D model for a single par-3 hole specified by its OSM way ID.
+        """Generate a 3D model for a single par-3 hole from local DTM files.
 
-        The DTM tile directory is automatically indexed into a VRT if needed.
+        When ``--hole-id`` is supplied the OSM hole outline clips the elevation
+        raster to the exact hole boundary.  When omitted, the ``--lat``/``--lon``
+        + ``--buffer`` bounding box is used and features (greens, bunkers) are
+        detected automatically from the elevation data.
+
         Outputs three STL files (base_terrain, green_inlay, bunker_cutout)
-        to a directory or ZIP archive for multi-material 3D printing.
+        for multi-material 3D printing.
+
+        For cloud-based elevation (no local files), use ``generate-api``.
         """
-        click.echo(f"Fetching hole geometry for OSM way {hole_id} …")
-        fetcher = CourseFetcher()
-        geometry = fetcher.fetch_hole_by_id(hole_id)
+        geometry = None
+        label = f"lat={lat},lon={lon}"
 
-        if geometry is None:
-            click.echo(f"ERROR: Could not find OSM way {hole_id}.", err=True)
-            sys.exit(1)
+        if hole_id is not None:
+            click.echo(f"Fetching hole geometry for OSM way {hole_id} …")
+            fetcher = CourseFetcher()
+            geometry = fetcher.fetch_hole_by_id(hole_id)
+            if geometry is None:
+                click.echo(f"ERROR: Could not find OSM way {hole_id}.", err=True)
+                sys.exit(1)
+            label = f"OSM way {hole_id}"
 
-        run_layered_pipeline(
+        generator = VRTHoleGenerator(
             dtm_dir=dtm_dir,
-            geometry=geometry,
-            lat=lat,
-            lon=lon,
-            buffer_m=buffer,
             base_thickness=base_thickness,
             z_scale=z_scale,
             target_size_mm=target_size,
+        )
+        generator.generate(
+            lat=lat,
+            lon=lon,
+            buffer_m=buffer,
             output_path=output,
-            label=f"OSM way {hole_id}",
+            label=label,
+            geometry=geometry,
         )

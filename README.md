@@ -7,27 +7,34 @@
 
 ## Overview
 
-This Docker-based tool takes a **directory of DTM tile files** and golf hole
-geometry from **OpenStreetMap** and produces three watertight **STL** meshes
-ready for multi-material 3D printing.  The intended output is a commemorative
-*Hole in One* plaque or desk ornament that captures the real terrain of a
-par-3 hole.
+This Docker-based tool takes either a **directory of local DTM tile files**
+or fetches elevation automatically from the **Ontario ArcGIS ImageServer**,
+combines it with golf hole geometry from **OpenStreetMap**, and produces
+three watertight **STL** meshes ready for multi-material 3D printing.
+The intended output is a commemorative *Hole in One* plaque or desk ornament
+that captures the real terrain of a par-3 hole.
 
 ```
+LOCAL PATH:
 DTM tiles ─► VRT index ─┐
                           ├──► clip ──► mesh layers ──► STL × 3
 OSM hole data ────────────┘
+
+CLOUD-NATIVE PATH:
+Ontario ArcGIS ImageServer ──► GeoTIFF ──► feature extraction ──► mesh layers ──► STL × 3
 ```
 
 ### Key features
 
 | Feature | Detail |
 |---------|--------|
-| Input | Directory of DTM tile files (`.img`, `.tif`, etc.) |
+| Input (local) | Directory of DTM tile files (`.img`, `.tif`, etc.) |
+| Input (cloud) | Ontario ArcGIS ImageServer (automatic, no local files needed) |
 | Output format | STL (three layer files) |
 | Multi-tile indexing | `index.vrt` built automatically with `gdalbuildvrt` |
-| Coordinate crop | `--lat` / `--lon` selects a 200 m × 200 m study area |
-| Golf course data | OpenStreetMap Overpass API (automatic) |
+| Coordinate crop | `--lat` / `--lon` selects a study area |
+| Golf course data | OpenStreetMap Overpass API (automatic, optional on cloud path) |
+| Feature extraction | scikit-image / SciPy blob detection for greens & bunkers |
 | Layered output | Three STLs for multi-material / filament-swap printing |
 | Vertical exaggeration | Configurable `--z-scale` |
 | Print-bed sizing | `--target-size` rescales to a given mm dimension |
@@ -38,16 +45,18 @@ OSM hole data ────────────┘
 
 ## Quick start (Docker)
 
-### 1. Obtain DTM tile files
+### Option A – Local DTM tiles (VRT path)
+
+#### 1. Obtain DTM tile files
 
 Download a package of elevation tiles covering your golf course, e.g.
 
 - **USGS 3DEP** – <https://apps.nationalmap.gov/downloader/>
 - **Copernicus DEM** – <https://spacedata.copernicus.eu/>
 - **OpenTopography** – <https://opentopography.org/>
-- **Natural Resources Canada (GeoGratis)** – <https://maps.canada.ca/czs/index-en.html>  
+- **Natural Resources Canada (GeoGratis)** – <https://maps.canada.ca/czs/index-en.html>
   Select *Digital Elevation* → *CDEM* (Canadian DEM, 20 m) or *HRDEM* (High-Resolution DEM, 1 m where available).
-- **Ontario GeoHub (LiDAR-derived DEM)** – <https://geohub.lio.gov.on.ca/>  
+- **Ontario GeoHub (LiDAR-derived DEM)** – <https://geohub.lio.gov.on.ca/>
   Search for *"Digital Elevation Model"* or *"LiDAR"*; Ontario Ministry of Natural Resources provides
   0.5 m – 1 m resolution tiles for most of the province (e.g. the Milton Package with 249 `.img` files).
 
@@ -65,23 +74,43 @@ An `index.vrt` is created automatically in the same directory the first time
 you run the tool.  If the directory contains only a single tile file that is
 fine too — the VRT simply wraps that one tile.
 
-### 2. Find the OSM way ID
+#### 2. Find the OSM way ID
 
 1. Go to <https://www.openstreetmap.org/> and navigate to your golf course.
 2. Click the *Query features* tool and click on the par-3 hole outline.
 3. Note the **Way ID** (e.g. `123456789`).
 
-### 3. Build and run
+#### 3. Build and run
 
 ```bash
 # Build the image (first time only)
 docker compose build
 
-# Generate a single par-3 hole (3 STL layers)
+# Generate a single par-3 hole (3 STL layers) – local VRT path
 docker compose run --rm generator generate \
     --dtm-dir /data/milton \
     --hole-id 123456789 \
     --lat 43.5123 --lon -79.8765 \
+    --output /output/hole3_layers
+```
+
+### Option B – Cloud-native path (Ontario ImageServer)
+
+No local files required.  Elevation data is fetched automatically from the
+[Ontario DTM LiDAR-Derived ImageServer](https://ws.geoservices.lrc.gov.on.ca/arcgis5/rest/services/Elevation/Ontario_DTM_LidarDerived/ImageServer).
+
+```bash
+# Fully automatic – lat/lon only, no OSM hole geometry
+docker compose run --rm generator generate \
+    --lat 43.5123 --lon -79.8765 \
+    --buffer 150 \
+    --output /output/hole3_layers
+
+# With optional OSM hole outline for better geometry clipping
+docker compose run --rm generator generate \
+    --hole-id 123456789 \
+    --lat 43.5123 --lon -79.8765 \
+    --buffer 150 \
     --output /output/hole3_layers
 ```
 
@@ -102,8 +131,15 @@ instead of a directory.
 ### 4. Generate all par-3 holes near a coordinate
 
 ```bash
+# Local VRT path
 docker compose run --rm generator generate-all \
     --dtm-dir /data/milton \
+    --lat 43.5123 --lon -79.8765 \
+    --radius 3000 \
+    --output-dir /output
+
+# Cloud-native path (no --dtm-dir)
+docker compose run --rm generator generate-all \
     --lat 43.5123 --lon -79.8765 \
     --radius 3000 \
     --output-dir /output
@@ -122,7 +158,7 @@ Usage: python -m src.main [OPTIONS] COMMAND [ARGS]...
   Automate generation of 3D-printable par-3 golf hole models from DTM data.
 
 Commands:
-  generate      Generate a 3D model for a single par-3 hole (by OSM way ID).
+  generate      Generate a 3D model for a par-3 hole.
   generate-all  Find all par-3 holes near LAT/LON and generate a model each.
 ```
 
@@ -130,11 +166,11 @@ Commands:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dtm-dir PATH` | *required* | Directory of DTM tile files; `index.vrt` built automatically |
+| `--dtm-dir PATH` | *none* | Directory of DTM tile files; `index.vrt` built automatically.  Omit to use the Ontario ArcGIS ImageServer |
 | `--lat FLOAT` | *required* | Latitude of study-area centre (WGS-84) |
 | `--lon FLOAT` | *required* | Longitude of study-area centre (WGS-84) |
-| `--hole-id INT` | *required* | OpenStreetMap way ID (`golf=hole`) |
-| `--buffer FLOAT` | `50` | Buffer in metres around the hole boundary |
+| `--hole-id INT` | *none* | OpenStreetMap way ID (`golf=hole`); optional on cloud-native path |
+| `--buffer FLOAT` | `50` | Buffer in metres around the hole boundary (local path) or fetch-area half-width (cloud path; recommend `150`) |
 | `--base-thickness FLOAT` | `3.0` | Solid base thickness (metres) |
 | `--z-scale FLOAT` | `1.5` | Vertical exaggeration factor |
 | `--target-size FLOAT` | *none* | Rescale longest XY dimension to this mm value |
@@ -144,11 +180,11 @@ Commands:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dtm-dir PATH` | *required* | Directory of DTM tile files; `index.vrt` built automatically |
+| `--dtm-dir PATH` | *none* | Directory of DTM tile files; `index.vrt` built automatically.  Omit to use the Ontario ArcGIS ImageServer |
 | `--lat FLOAT` | *required* | Latitude of search centre (WGS-84) |
 | `--lon FLOAT` | *required* | Longitude of search centre (WGS-84) |
 | `--radius FLOAT` | `5000` | Search radius in metres |
-| `--buffer FLOAT` | `50` | Buffer in metres around each hole boundary |
+| `--buffer FLOAT` | `50` | Buffer in metres around each hole boundary (local path) or fetch-area half-width (cloud path; recommend `150`) |
 | `--base-thickness FLOAT` | `3.0` | Solid base thickness (metres) |
 | `--z-scale FLOAT` | `1.5` | Vertical exaggeration factor |
 | `--target-size FLOAT` | *none* | Rescale longest XY dimension to this mm value |
@@ -165,11 +201,17 @@ sudo apt-get install gdal-bin libgdal-dev libspatialindex-dev
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Generate a single hole
+# Generate a single hole – local VRT path
 python -m src.main generate \
     --dtm-dir data/milton \
     --hole-id 123456789 \
     --lat 43.5123 --lon -79.8765 \
+    --output output/hole_layers
+
+# Generate a single hole – cloud-native path (no local files needed)
+python -m src.main generate \
+    --lat 43.5123 --lon -79.8765 \
+    --buffer 150 \
     --output output/hole_layers
 
 # Generate all par-3 holes near a coordinate
@@ -200,18 +242,24 @@ golf-course-3d-generator/
 │   ├── course_fetcher.py  # OpenStreetMap Overpass queries
 │   ├── mesh_generator.py  # Elevation → watertight 3-D mesh (+ layer support)
 │   ├── exporter.py        # STL / OBJ / ZIP export
-│   └── commands/
+│   ├── commands/
+│   │   ├── __init__.py
+│   │   ├── options.py      # Shared Click option decorators
+│   │   ├── generate.py     # `generate` sub-command
+│   │   └── generate_all.py # `generate-all` sub-command
+│   └── services/
 │       ├── __init__.py
-│       ├── options.py      # Shared Click option decorators
-│       ├── generate.py     # `generate` sub-command
-│       └── generate_all.py # `generate-all` sub-command
+│       ├── ontario_geohub.py    # Ontario ArcGIS ImageServer REST client
+│       └── feature_extractor.py # skimage/scipy green & bunker detection
 ├── tests/
 │   ├── test_dtm_processor.py
 │   ├── test_mesh_generator.py
 │   ├── test_mesh_generator_layers.py
 │   ├── test_vrt_builder.py
 │   ├── test_course_fetcher.py
-│   └── test_exporter.py
+│   ├── test_exporter.py
+│   ├── test_ontario_geohub.py
+│   └── test_feature_extractor.py
 ├── data/      # Place your DTM tile directories here (not committed)
 └── output/    # Generated STL files (not committed)
 ```
@@ -233,27 +281,43 @@ python -m pytest tests/ -v
 
 ## Pipeline details
 
-1. **VRT Builder** (`src/vrt_builder.py`)  
+1. **VRT Builder** (`src/vrt_builder.py`)
    Scans the tile directory for `.img` (or `.tif`) files and runs
    `gdalbuildvrt -overwrite` to create `index.vrt`.  An existing VRT is
    reused on subsequent runs without rebuilding.
 
-2. **DTM Processor** (`src/dtm_processor.py`)  
-   Opens the VRT with `rasterio`, reprojects the hole geometry into the
-   raster's CRS, and returns a clipped NumPy elevation array.
+2. **Ontario GeoHub Client** (`src/services/ontario_geohub.py`)
+   When `--dtm-dir` is omitted, sends an `exportImage` REST request to the
+   Ontario DTM LiDAR-Derived ImageServer with a bounding box derived from
+   `--lat` / `--lon` and `--buffer`.  Returns a 32-bit float GeoTIFF in
+   EPSG:3857 stored in a temporary file.
 
-3. **Course Fetcher** (`src/course_fetcher.py`)  
+3. **DTM Processor** (`src/dtm_processor.py`)
+   Opens the VRT or the temporary GeoTIFF with `rasterio`, reprojects the
+   hole geometry into the raster's CRS, and returns a clipped NumPy
+   elevation array.
+
+4. **Course Fetcher** (`src/course_fetcher.py`)
    Queries the OpenStreetMap Overpass API for `golf=hole` ways tagged
-   `par=3`.  Returns Shapely polygons in WGS-84.
+   `par=3`.  Returns Shapely polygons in WGS-84.  Not required when using
+   the cloud-native path without `--hole-id`.
 
-4. **Mesh Generator** (`src/mesh_generator.py`)  
-   Converts the elevation grid to three watertight trimesh solids via
-   `generate_layers()`:
+5. **Feature Extractor** (`src/services/feature_extractor.py`)
+   Used on the cloud-native path to identify features directly from raw
+   elevation data (no OSM outlines required):
+   - *green / tee*: contiguous flat plateaus at or above median elevation,
+     detected via gradient-magnitude thresholding and `skimage.measure.label`.
+   - *bunker*: local depressions revealed by a morphological bottom-hat
+     transform (`scipy.ndimage.grey_closing` − original), filtered to pixels
+     below `median − 0.5 × std`.
+
+6. **Mesh Generator** (`src/mesh_generator.py`)
+   Converts the elevation grid to three watertight trimesh solids:
    - *base_terrain*: full terrain (structural body).
-   - *green_inlay*: flat elevated plateaus (low slope + Z ≥ median).
-   - *bunker_cutout*: local depressions (Z < median − 0.5 × std).
+   - *green_inlay*: flat elevated plateaus.
+   - *bunker_cutout*: local depressions.
 
-5. **Exporter** (`src/exporter.py`)  
+7. **Exporter** (`src/exporter.py`)
    Writes the three layer meshes to disk:
    - `export_layers_to_dir()` – three `<name>.stl` files in a directory.
    - `export_layers_to_zip()` – a single ZIP archive containing the three STLs.
