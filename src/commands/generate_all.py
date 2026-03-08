@@ -6,9 +6,7 @@ OpenStreetMap is queried for all ways tagged ``golf=hole`` + ``par=3``
 within the specified search radius.  A separate output directory (or ZIP)
 containing three STL files is produced for each hole found.
 
-Example
--------
-::
+**Local DTM (VRT path)** – provide ``--dtm-dir``::
 
     python -m src.main generate-all \\
         --dtm-dir /data/milton \\
@@ -16,6 +14,14 @@ Example
         --radius 3000 \\
         --output-dir /output \\
         --z-scale 1.5
+
+**Cloud-native path** – omit ``--dtm-dir`` (elevation fetched per-hole
+from the Ontario ArcGIS ImageServer)::
+
+    python -m src.main generate-all \\
+        --lat 43.5123 --lon -79.8765 \\
+        --radius 3000 \\
+        --output-dir /output
 
 Inside Docker::
 
@@ -117,7 +123,6 @@ def register(cli: click.Group) -> None:
             )
             try:
                 run_layered_pipeline(
-                    dtm_dir=dtm_dir,
                     geometry=hole["geometry"],
                     lat=hole_lat,
                     lon=hole_lon,
@@ -127,6 +132,7 @@ def register(cli: click.Group) -> None:
                     target_size_mm=target_size,
                     output_path=output_path,
                     label=label,
+                    dtm_dir=dtm_dir,
                 )
             except Exception as exc:  # noqa: BLE001
                 click.echo(

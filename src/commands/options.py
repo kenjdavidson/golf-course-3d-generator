@@ -24,16 +24,19 @@ def dtm_dir_option(f):
 
     The directory is automatically indexed into an ``index.vrt`` Virtual
     Raster (built with ``gdalbuildvrt``) if one does not already exist.
-    Must be used together with ``--lat`` / ``--lon`` to select the study area.
+    When omitted, the Ontario ArcGIS ImageServer is used automatically
+    to fetch elevation data for the ``--lat`` / ``--lon`` area.
     """
     return click.option(
         "--dtm-dir",
-        required=True,
+        required=False,
+        default=None,
         type=click.Path(exists=True, file_okay=False, dir_okay=True),
         help=(
             "Path to a directory containing DTM/DEM tile files (.img or .tif).  "
             "An index.vrt is created automatically if absent.  "
-            "Must be combined with --lat and --lon."
+            "When omitted, elevation data is fetched automatically from the "
+            "Ontario ArcGIS ImageServer using --lat and --lon."
         ),
     )(f)
 
