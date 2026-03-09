@@ -17,11 +17,11 @@ that captures the real terrain of a par-3 hole.
 ```
 LOCAL PATH  (generate / generate-all):
 DTM tiles ─► VRT index ─┐
-                          ├──► clip ──► mesh layers ──► STL × 3
+                          ├──► clip ──► GradientMeshProcessor ──► LayeredSTLOutput ──► STL × 3
 OSM hole data ────────────┘
 
 CLOUD-NATIVE PATH  (generate-api):
-Ontario ArcGIS ImageServer ──► GeoTIFF ──► feature extraction ──► mesh layers ──► STL × 3
+Ontario ArcGIS ImageServer ──► GeoTIFF ──► LoGMeshProcessor ──► LayeredSTLOutput ──► STL × 3
 ```
 
 ### Key features
@@ -270,7 +270,7 @@ golf-course-3d-generator/
 │   ├── vrt_builder.py      # Multi-tile VRT index builder (gdalbuildvrt)
 │   ├── course_fetcher.py   # OpenStreetMap Overpass queries
 │   ├── mesh_generator.py   # Elevation → watertight 3-D mesh (+ layer support)
-│   ├── exporter.py         # STL / ZIP export
+│   ├── exporter.py         # STL / ZIP export (low-level I/O helpers)
 │   ├── commands/
 │   │   ├── __init__.py
 │   │   ├── options.py       # Shared Click option decorators
@@ -279,10 +279,19 @@ golf-course-3d-generator/
 │   │   └── generate_api.py  # `generate-api` sub-command (Ontario ImageServer)
 │   ├── generators/
 │   │   ├── __init__.py
-│   │   ├── base.py          # HoleGenerator abstract base class
+│   │   ├── base.py          # HoleGenerator abstract base class (acquire_elevation only)
 │   │   ├── factory.py       # create_generator() factory function
 │   │   ├── vrt_generator.py         # VRTHoleGenerator (local DTM path)
 │   │   └── imageserver_generator.py # ImageServerHoleGenerator (cloud path)
+│   ├── processors/
+│   │   ├── __init__.py
+│   │   ├── base.py                  # MeshProcessor abstract base class
+│   │   ├── gradient_processor.py    # GradientMeshProcessor (gradient/threshold)
+│   │   └── log_processor.py         # LoGMeshProcessor (Laplacian of Gaussian)
+│   ├── outputs/
+│   │   ├── __init__.py
+│   │   ├── base.py                  # OutputWriter abstract base class
+│   │   └── layered_stl_output.py    # LayeredSTLOutput (STL files / ZIP archive)
 │   └── services/
 │       ├── __init__.py
 │       ├── ontario_geohub.py    # Ontario ArcGIS ImageServer REST client
@@ -297,6 +306,8 @@ golf-course-3d-generator/
 │   ├── test_ontario_geohub.py
 │   ├── test_feature_extractor.py
 │   ├── test_generators.py
+│   ├── test_processors.py
+│   ├── test_outputs.py
 │   ├── test_generate_command.py
 │   └── test_generate_api_command.py
 ├── data/      # Place your DTM tile directories here (not committed)
@@ -320,8 +331,32 @@ python -m pytest tests/ -v
 
 ## Pipeline details
 
-The generation logic is organised into a `generators/` package with an
-abstract base class and two concrete implementations selected by the CLI:
+The generation logic is organised as a three-stage pipeline:
+
+```
+DataSource (HoleGenerator.acquire_elevation)
+    │
+    ▼
+MeshProcessor (MeshProcessor.build_meshes)
+    │
+    ▼
+OutputWriter (OutputWriter.write)
+```
+
+Each stage is independently abstracted and can be swapped without modifying
+the others.  Concrete implementations are selected via the
+`src.generators.factory.create_generator()` factory (or by instantiating
+generators directly).
+
+### Stage 1 – Data acquisition (`generators/`)
+
+A :class:`HoleGenerator` sub-class implements `acquire_elevation()` to
+obtain a NumPy elevation array and its rasterio affine transform:
+
+| Class | Source |
+|-------|--------|
+| `VRTHoleGenerator` | Local DTM tile directory → GDAL VRT index |
+| `ImageServerHoleGenerator` | Ontario ArcGIS ImageServer (cloud, no local files) |
 
 ### Local DTM path (`generate` / `generate-all`)
 
@@ -340,15 +375,6 @@ abstract base class and two concrete implementations selected by the CLI:
    opens the VRT with `rasterio`, reprojects the hole geometry into the
    raster's CRS, and returns a clipped NumPy elevation array.
 
-4. **Feature Extractor** (`src/services/feature_extractor.py`)
-   When no OSM outline is provided, detects features directly from the
-   elevation grid using a Laplacian of Gaussian (LoG) filter:
-   - *green / tee*: contiguous flat plateaus at or above median elevation,
-     detected via gradient-magnitude thresholding and `skimage.measure.label`.
-   - *bunker*: local depressions revealed by a morphological bottom-hat
-     transform (`scipy.ndimage.grey_closing` − original), filtered to pixels
-     below `median − 0.5 × std`.
-
 ### Cloud-native path (`generate-api`)
 
 1. **Ontario GeoHub Client** (`src/services/ontario_geohub.py`)
@@ -360,36 +386,106 @@ abstract base class and two concrete implementations selected by the CLI:
 2. **ImageServer Generator** (`src/generators/imageserver_generator.py`)
    Implements `HoleGenerator.acquire_elevation` for the cloud path: fetches
    the GeoTIFF via the Ontario GeoHub Client, opens it with `rasterio`, and
-   returns the elevation array.  Feature detection follows the same LoG
-   pipeline as the local path.
+   returns the elevation array.
 
-### Shared stages (both paths)
+---
 
-5. **Mesh Generator** (`src/mesh_generator.py`)
-   Converts the elevation grid to three watertight trimesh solids:
-   - *base_terrain*: full terrain (structural body).
-   - *green_inlay*: flat elevated plateaus.
-   - *bunker_cutout*: local depressions.
+### Stage 2 – Mesh processing (`processors/`)
 
-6. **Exporter** (`src/exporter.py`)
-   Writes the three layer meshes to disk:
-   - `export_layers_to_dir()` – three `<name>.stl` files in a directory.
-   - `export_layers_to_zip()` – a single ZIP archive containing the three STLs.
+A :class:`MeshProcessor` sub-class implements `build_meshes()` to convert
+the elevation array into a ``name → Trimesh`` dictionary.  Different
+processors apply different feature-detection and layer-construction strategies:
+
+| Class | Algorithm |
+|-------|-----------|
+| `GradientMeshProcessor` | Gradient-magnitude thresholding (default for VRT path) |
+| `LoGMeshProcessor` | Laplacian of Gaussian feature extraction (default for cloud path) |
+
+Processors are **fully decoupled** from the data source — any processor can
+be used with any generator by passing it at construction time::
+
+    from src.generators.factory import create_generator
+    from src.processors.log_processor import LoGMeshProcessor
+
+    gen = create_generator(
+        dtm_dir="/data/milton",
+        processor=LoGMeshProcessor(z_scale=2.0),
+    )
+
+#### `GradientMeshProcessor` (`src/processors/gradient_processor.py`)
+
+Identifies features by thresholding the elevation (Z) values relative to the
+median terrain height and the local slope:
+
+- *green inlay*: low gradient magnitude **and** elevation ≥ median.
+- *bunker*: below ``median − 0.5 × std``.
+
+Delegates triangulation to `MeshGenerator.generate_layers()`.
+
+#### `LoGMeshProcessor` (`src/processors/log_processor.py`)
+
+Uses :class:`~src.services.feature_extractor.FeatureExtractor` to detect
+features directly from raw elevation data:
+
+- *green inlay*: contiguous flat plateaus at or above median elevation,
+  detected via gradient-magnitude thresholding and `skimage.measure.label`.
+- *bunker*: local depressions revealed by a morphological bottom-hat
+  transform (`scipy.ndimage.grey_closing` − original), filtered to pixels
+  below `median − 0.5 × std`.
+
+---
+
+### Stage 3 – Output writing (`outputs/`)
+
+An :class:`OutputWriter` sub-class implements `write()` to persist the
+``name → Trimesh`` mapping in the desired format:
+
+| Class | Output |
+|-------|--------|
+| `LayeredSTLOutput` | Three `.stl` files in a directory, or a single `.zip` archive |
+
+Custom writers can be injected to support new output styles (e.g. exact
+DTM height maps, carved in-ground plaques) without modifying the acquisition
+or processing stages::
+
+    from src.outputs.base import OutputWriter
+
+    class MyCustomOutput(OutputWriter):
+        def write(self, meshes, output_path):
+            # custom serialisation logic here
+            ...
+
+    gen = create_generator(output_writer=MyCustomOutput())
+
+---
 
 ### Generator architecture
 
 ```
 HoleGenerator (abstract, src/generators/base.py)
-├── acquire_elevation()   ← implemented by each sub-class
-├── build_meshes()        ← implemented by each sub-class
-└── generate()            ← orchestrates acquire → mesh → export
+├── acquire_elevation()   ← implemented by each sub-class (data source)
+├── generate()            ← orchestrates acquire → process → write
+│       │
+│       ├── MeshProcessor.build_meshes()   ← injected or default per sub-class
+│       └── OutputWriter.write()           ← injected or LayeredSTLOutput default
+│
+├── VRTHoleGenerator          (local DTM / VRT)
+│   └── default processor: GradientMeshProcessor
+└── ImageServerHoleGenerator  (Ontario ArcGIS ImageServer)
+    └── default processor: LoGMeshProcessor
 
-    VRTHoleGenerator          ImageServerHoleGenerator
-    (local DTM / VRT)         (Ontario ArcGIS ImageServer)
+MeshProcessor (abstract, src/processors/base.py)
+├── GradientMeshProcessor  (gradient/threshold)
+└── LoGMeshProcessor       (Laplacian of Gaussian)
+
+OutputWriter (abstract, src/outputs/base.py)
+└── LayeredSTLOutput       (three STLs or one ZIP)
 ```
 
 Use `src.generators.factory.create_generator()` to select the right
 implementation programmatically (pass `dtm_dir` for local, omit for cloud).
+Custom processors and output writers can be injected via the `processor` and
+`output_writer` parameters.
 
 ---
 

@@ -6,8 +6,10 @@ Produces 3D hole models from a local directory of DTM tile files by:
    tiles in the configured directory.
 2. Clipping the raster to a study-area derived from the given coordinate
    and (optionally) the hole's OSM geometry.
-3. Running :meth:`~src.mesh_generator.MeshGenerator.generate_layers` which
-   uses a gradient/threshold approach to identify greens and bunkers.
+3. Delegating mesh construction to the configured
+   :class:`~src.processors.base.MeshProcessor` (defaults to
+   :class:`~src.processors.gradient_processor.GradientMeshProcessor` which
+   uses a gradient/threshold approach to identify greens and bunkers).
 
 Usage
 -----
@@ -30,6 +32,9 @@ import rasterio.transform
 
 from ..dtm_processor import DTMProcessor
 from ..geo_utils import buffer_wgs84_geometry, coordinate_to_study_area
+from ..outputs.base import OutputWriter
+from ..processors.base import MeshProcessor
+from ..processors.gradient_processor import GradientMeshProcessor
 from ..vrt_builder import VRTBuilder
 from .base import HoleGenerator
 
@@ -49,6 +54,14 @@ class VRTHoleGenerator(HoleGenerator):
         Vertical exaggeration factor.
     target_size_mm:
         Optional print-bed size (longest XY → this many mm).
+    processor:
+        :class:`~src.processors.base.MeshProcessor` to use for building
+        meshes.  Defaults to
+        :class:`~src.processors.gradient_processor.GradientMeshProcessor`.
+    output_writer:
+        :class:`~src.outputs.base.OutputWriter` to use for persisting
+        meshes.  Defaults to
+        :class:`~src.outputs.layered_stl_output.LayeredSTLOutput`.
     """
 
     def __init__(
@@ -57,9 +70,23 @@ class VRTHoleGenerator(HoleGenerator):
         base_thickness: float = 3.0,
         z_scale: float = 1.5,
         target_size_mm: Optional[float] = None,
+        processor: Optional[MeshProcessor] = None,
+        output_writer: Optional[OutputWriter] = None,
     ) -> None:
-        super().__init__(base_thickness, z_scale, target_size_mm)
+        super().__init__(
+            base_thickness=base_thickness,
+            z_scale=z_scale,
+            target_size_mm=target_size_mm,
+            processor=processor,
+            output_writer=output_writer,
+        )
         self.dtm_dir = dtm_dir
+        if self.processor is None:
+            self.processor = GradientMeshProcessor(
+                base_thickness=base_thickness,
+                z_scale=z_scale,
+                target_size_mm=target_size_mm,
+            )
 
     # ------------------------------------------------------------------
     # HoleGenerator interface
@@ -116,21 +143,3 @@ class VRTHoleGenerator(HoleGenerator):
             elevation, transform = proc.clip_to_geometry(clip_geom)
 
         return elevation, transform
-
-    def build_meshes(
-        self,
-        elevation: np.ndarray,
-        transform: rasterio.transform.Affine,
-    ) -> dict:
-        """Build three layer meshes using the gradient/threshold approach.
-
-        Delegates to :meth:`~src.mesh_generator.MeshGenerator.generate_layers`
-        which identifies greens (low slope + high elevation) and bunkers
-        (below median − 0.5 × std).
-
-        Returns
-        -------
-        dict
-            Keys ``"base_terrain"``, ``"green_inlay"``, ``"bunker_cutout"``.
-        """
-        return self._make_mesh_generator().generate_layers(elevation, transform)

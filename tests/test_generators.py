@@ -3,8 +3,8 @@ Tests for the generators package.
 
 Covers:
 * HoleGenerator abstract interface via concrete sub-class.
-* VRTHoleGenerator (acquire_elevation mocked, build_meshes verified).
-* ImageServerHoleGenerator (HTTP and DTMProcessor mocked).
+* VRTHoleGenerator (acquire_elevation mocked, default processor verified).
+* ImageServerHoleGenerator (HTTP and DTMProcessor mocked, default processor verified).
 * create_generator factory function.
 """
 
@@ -23,6 +23,10 @@ from src.generators.base import HoleGenerator
 from src.generators.vrt_generator import VRTHoleGenerator
 from src.generators.imageserver_generator import ImageServerHoleGenerator
 from src.generators.factory import create_generator
+from src.processors.base import MeshProcessor
+from src.processors.gradient_processor import GradientMeshProcessor
+from src.processors.log_processor import LoGMeshProcessor
+from src.outputs.base import OutputWriter
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +81,6 @@ class ConcreteGenerator(HoleGenerator):
         transform = _flat_transform()
         return elevation, transform
 
-    def build_meshes(self, elevation, transform):
-        gen = self._make_mesh_generator()
-        return gen.generate_layers(elevation, transform)
-
 
 class TestHoleGeneratorBase:
     def test_generate_creates_output_directory(self):
@@ -111,6 +111,33 @@ class TestHoleGeneratorBase:
         assert mg.base_thickness == 5.0
         assert mg.z_scale == 3.0
         assert mg.target_size_mm == 200.0
+
+    def test_custom_processor_is_used(self):
+        """An injected processor should be used instead of the default."""
+        custom_processor = MagicMock(spec=MeshProcessor)
+        custom_processor.build_meshes.return_value = {}
+
+        custom_writer = MagicMock(spec=OutputWriter)
+
+        gen = ConcreteGenerator(processor=custom_processor, output_writer=custom_writer)
+        gen.generate(lat=43.5, lon=-79.8, buffer_m=50, output_path="/tmp/out")
+
+        custom_processor.build_meshes.assert_called_once()
+        custom_writer.write.assert_called_once()
+
+    def test_custom_output_writer_is_used(self):
+        """An injected output_writer should receive the processor's meshes."""
+        sentinel = {"base_terrain": MagicMock()}
+
+        custom_processor = MagicMock(spec=MeshProcessor)
+        custom_processor.build_meshes.return_value = sentinel
+
+        custom_writer = MagicMock(spec=OutputWriter)
+
+        gen = ConcreteGenerator(processor=custom_processor, output_writer=custom_writer)
+        gen.generate(lat=43.5, lon=-79.8, buffer_m=50, output_path="/tmp/hole")
+
+        custom_writer.write.assert_called_once_with(sentinel, "/tmp/hole")
 
 
 # ---------------------------------------------------------------------------
@@ -144,14 +171,32 @@ class TestVRTHoleGenerator:
         finally:
             os.unlink(path)
 
-    def test_build_meshes_returns_three_keys(self):
+    def test_default_processor_is_gradient(self):
+        """VRTHoleGenerator should default to GradientMeshProcessor."""
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = VRTHoleGenerator(dtm_dir=tmp)
+        assert isinstance(gen.processor, GradientMeshProcessor)
+
+    def test_default_processor_has_correct_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = VRTHoleGenerator(dtm_dir=tmp, base_thickness=5.0, z_scale=2.0, target_size_mm=150.0)
+        assert gen.processor.base_thickness == 5.0
+        assert gen.processor.z_scale == 2.0
+        assert gen.processor.target_size_mm == 150.0
+
+    def test_processor_build_meshes_returns_three_keys(self):
         elevation = _terrain_elevation()
         transform = _flat_transform()
         with tempfile.TemporaryDirectory() as tmp:
             gen = VRTHoleGenerator(dtm_dir=tmp)
-            # Stub out acquire_elevation to bypass file I/O
-            meshes = gen.build_meshes(elevation, transform)
+            meshes = gen.processor.build_meshes(elevation, transform)
         assert set(meshes.keys()) == {"base_terrain", "green_inlay", "bunker_cutout"}
+
+    def test_custom_processor_overrides_default(self):
+        custom = MagicMock(spec=MeshProcessor)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = VRTHoleGenerator(dtm_dir=tmp, processor=custom)
+        assert gen.processor is custom
 
     def test_generate_with_geometry_calls_clip(self):
         """When a hole geometry is supplied it should be used for clipping."""
@@ -229,21 +274,37 @@ class TestImageServerHoleGenerator:
         for p in created:
             assert not os.path.exists(p), f"Temp file was not cleaned up: {p}"
 
-    def test_build_meshes_returns_three_keys(self):
+    def test_default_processor_is_log(self):
+        """ImageServerHoleGenerator should default to LoGMeshProcessor."""
+        gen = ImageServerHoleGenerator()
+        assert isinstance(gen.processor, LoGMeshProcessor)
+
+    def test_default_processor_has_correct_settings(self):
+        gen = ImageServerHoleGenerator(base_thickness=4.0, z_scale=2.0, target_size_mm=200.0)
+        assert gen.processor.base_thickness == 4.0
+        assert gen.processor.z_scale == 2.0
+        assert gen.processor.target_size_mm == 200.0
+
+    def test_processor_build_meshes_returns_three_keys(self):
         elevation = _terrain_elevation()
         transform = _flat_transform()
         gen = ImageServerHoleGenerator()
-        meshes = gen.build_meshes(elevation, transform)
+        meshes = gen.processor.build_meshes(elevation, transform)
         assert set(meshes.keys()) == {"base_terrain", "green_inlay", "bunker_cutout"}
 
-    def test_build_meshes_all_trimesh_instances(self):
+    def test_processor_build_meshes_all_trimesh_instances(self):
         import trimesh
         elevation = _terrain_elevation()
         transform = _flat_transform()
         gen = ImageServerHoleGenerator()
-        meshes = gen.build_meshes(elevation, transform)
+        meshes = gen.processor.build_meshes(elevation, transform)
         for name, mesh in meshes.items():
             assert isinstance(mesh, trimesh.Trimesh), f"{name} is not a Trimesh"
+
+    def test_custom_processor_overrides_default(self):
+        custom = MagicMock(spec=MeshProcessor)
+        gen = ImageServerHoleGenerator(processor=custom)
+        assert gen.processor is custom
 
 
 # ---------------------------------------------------------------------------
@@ -281,3 +342,19 @@ class TestCreateGenerator:
         gen = create_generator(base_thickness=4.0, z_scale=1.0)
         assert gen.base_thickness == 4.0
         assert gen.z_scale == 1.0
+
+    def test_custom_processor_injected_into_vrt_generator(self):
+        custom = MagicMock(spec=MeshProcessor)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = create_generator(dtm_dir=tmp, processor=custom)
+        assert gen.processor is custom
+
+    def test_custom_processor_injected_into_imageserver_generator(self):
+        custom = MagicMock(spec=MeshProcessor)
+        gen = create_generator(processor=custom)
+        assert gen.processor is custom
+
+    def test_custom_output_writer_injected(self):
+        custom_writer = MagicMock(spec=OutputWriter)
+        gen = create_generator(output_writer=custom_writer)
+        assert gen.output_writer is custom_writer

@@ -20,6 +20,8 @@ from shapely.geometry.base import BaseGeometry
 # Re-export utilities from geo_utils for backward compatibility.
 from .geo_utils import buffer_wgs84_geometry, coordinate_to_study_area  # noqa: F401
 from .generators.factory import create_generator
+from .outputs.base import OutputWriter
+from .processors.base import MeshProcessor
 
 
 def run_layered_pipeline(
@@ -33,6 +35,8 @@ def run_layered_pipeline(
     output_path: str,
     label: str,
     dtm_dir: Optional[str] = None,
+    processor: Optional[MeshProcessor] = None,
+    output_writer: Optional[OutputWriter] = None,
 ) -> None:
     """Run the full acquisition → mesh → export pipeline.
 
@@ -68,12 +72,21 @@ def run_layered_pipeline(
         Human-readable label for progress messages.
     dtm_dir:
         Local DTM tile directory.  ``None`` → Ontario ImageServer.
+    processor:
+        Optional :class:`~src.processors.base.MeshProcessor` override.
+        When ``None`` each generator picks its own default.
+    output_writer:
+        Optional :class:`~src.outputs.base.OutputWriter` override.
+        When ``None`` defaults to
+        :class:`~src.outputs.layered_stl_output.LayeredSTLOutput`.
     """
     generator = create_generator(
         dtm_dir=dtm_dir,
         base_thickness=base_thickness,
         z_scale=z_scale,
         target_size_mm=target_size_mm,
+        processor=processor,
+        output_writer=output_writer,
     )
     generator.generate(
         lat=lat,
