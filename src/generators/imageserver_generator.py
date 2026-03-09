@@ -5,9 +5,10 @@ Produces 3D hole models without any local files by:
 1. Fetching a 32-bit float GeoTIFF from the Ontario DTM LiDAR-Derived
    ImageServer via :class:`~src.services.ontario_geohub.OntarioGeohubClient`.
 2. Optionally clipping the raster to an OSM hole geometry.
-3. Running :class:`~src.services.feature_extractor.FeatureExtractor` (which
-   uses a Laplacian-of-Gaussian filter) to identify greens/tees and bunkers
-   directly from the raw elevation data.
+3. Delegating mesh construction to the configured
+   :class:`~src.processors.base.MeshProcessor` (defaults to
+   :class:`~src.processors.log_processor.LoGMeshProcessor` which uses a
+   Laplacian-of-Gaussian filter to identify greens/tees and bunkers).
 
 Usage
 -----
@@ -30,8 +31,9 @@ import numpy as np
 import rasterio.transform
 
 from ..dtm_processor import DTMProcessor
-from ..mesh_generator import MeshGenerator
-from ..services.feature_extractor import FeatureExtractor
+from ..outputs.base import OutputWriter
+from ..processors.base import MeshProcessor
+from ..processors.log_processor import LoGMeshProcessor
 from ..services.ontario_geohub import OntarioGeohubClient
 from .base import HoleGenerator
 
@@ -42,8 +44,8 @@ class ImageServerHoleGenerator(HoleGenerator):
     No local DTM files are required.  Elevation data is downloaded on-demand
     as a 32-bit float GeoTIFF and stored only for the duration of processing.
 
-    Feature segmentation uses the Laplacian-of-Gaussian approach implemented
-    in :class:`~src.services.feature_extractor.FeatureExtractor`:
+    Feature segmentation defaults to the Laplacian-of-Gaussian approach
+    implemented in :class:`~src.processors.log_processor.LoGMeshProcessor`:
 
     * ``green_inlay`` – convex plateaus (negative LoG + slope < 3°).
     * ``bunker_cutout`` – concave depressions (positive LoG + below median).
@@ -56,6 +58,14 @@ class ImageServerHoleGenerator(HoleGenerator):
         Vertical exaggeration factor.
     target_size_mm:
         Optional print-bed size (longest XY → this many mm).
+    processor:
+        :class:`~src.processors.base.MeshProcessor` to use for building
+        meshes.  Defaults to
+        :class:`~src.processors.log_processor.LoGMeshProcessor`.
+    output_writer:
+        :class:`~src.outputs.base.OutputWriter` to use for persisting
+        meshes.  Defaults to
+        :class:`~src.outputs.layered_stl_output.LayeredSTLOutput`.
     """
 
     def __init__(
@@ -63,9 +73,23 @@ class ImageServerHoleGenerator(HoleGenerator):
         base_thickness: float = 3.0,
         z_scale: float = 1.5,
         target_size_mm: Optional[float] = None,
+        processor: Optional[MeshProcessor] = None,
+        output_writer: Optional[OutputWriter] = None,
     ) -> None:
-        super().__init__(base_thickness, z_scale, target_size_mm)
+        super().__init__(
+            base_thickness=base_thickness,
+            z_scale=z_scale,
+            target_size_mm=target_size_mm,
+            processor=processor,
+            output_writer=output_writer,
+        )
         self._client = OntarioGeohubClient()
+        if self.processor is None:
+            self.processor = LoGMeshProcessor(
+                base_thickness=base_thickness,
+                z_scale=z_scale,
+                target_size_mm=target_size_mm,
+            )
 
     # ------------------------------------------------------------------
     # HoleGenerator interface
@@ -129,34 +153,3 @@ class ImageServerHoleGenerator(HoleGenerator):
             os.unlink(tmp_path)
 
         return elevation, transform
-
-    def build_meshes(
-        self,
-        elevation: np.ndarray,
-        transform: rasterio.transform.Affine,
-    ) -> dict:
-        """Build three layer meshes using LoG-based feature extraction.
-
-        Uses :class:`~src.services.feature_extractor.FeatureExtractor` to
-        produce green and bunker masks, then builds watertight meshes for
-        each layer with :class:`~src.mesh_generator.MeshGenerator`.
-
-        Returns
-        -------
-        dict
-            Keys ``"base_terrain"``, ``"green_inlay"``, ``"bunker_cutout"``.
-        """
-        extractor = FeatureExtractor()
-        green_mask = extractor.extract_green_mask(elevation)
-        bunker_mask = extractor.extract_bunker_mask(elevation)
-
-        filled = MeshGenerator._fill_nan(elevation)
-        green_elev = np.where(green_mask, filled, np.nan)
-        bunker_elev = np.where(bunker_mask, filled, np.nan)
-
-        gen = self._make_mesh_generator()
-        return {
-            "base_terrain": gen.generate(elevation, transform),
-            "green_inlay": gen.generate(green_elev, transform),
-            "bunker_cutout": gen.generate(bunker_elev, transform),
-        }

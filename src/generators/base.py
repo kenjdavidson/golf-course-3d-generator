@@ -1,19 +1,22 @@
 """Abstract base class for all hole-model generators.
 
-Every generator implements two abstract methods:
+Every generator implements one abstract method:
 
 * :meth:`acquire_elevation` – obtain a NumPy elevation array and its
   rasterio affine transform from whatever data source the generator uses.
-* :meth:`build_meshes` – convert the elevation array into a dictionary of
-  named :class:`trimesh.Trimesh` objects (one per print layer).
+
+The conversion of the elevation array into meshes is delegated to a
+:class:`~src.processors.base.MeshProcessor`, and the export of those meshes
+is delegated to an :class:`~src.outputs.base.OutputWriter`.  Both can be
+injected at construction time to customise the pipeline without modifying the
+generator sub-classes.
 
 The public entry point is :meth:`generate`, which orchestrates the full
-pipeline and exports the resulting meshes to disk.
+pipeline: acquire → process → write.
 """
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
@@ -21,26 +24,41 @@ import numpy as np
 import click
 import rasterio.transform
 
-from ..exporter import Exporter
 from ..mesh_generator import MeshGenerator
+from ..outputs.base import OutputWriter
+from ..outputs.layered_stl_output import LayeredSTLOutput
+from ..processors.base import MeshProcessor
 
 
 class HoleGenerator(ABC):
     """Abstract base for hole 3D model generators.
 
     Sub-classes provide the elevation acquisition strategy (local VRT or
-    cloud service) and the feature-segmentation strategy.  The export logic
-    is shared via the concrete :meth:`generate` method on this class.
+    cloud service) and set a default :class:`~src.processors.base.MeshProcessor`.
+    The mesh-construction and file-export stages are fully decoupled via the
+    ``processor`` and ``output_writer`` injection points.
 
     Parameters
     ----------
     base_thickness:
-        Solid base depth in metres (3D printing).
+        Solid base depth in metres (3D printing).  Forwarded to the default
+        processor when no explicit *processor* is supplied.
     z_scale:
-        Vertical exaggeration factor applied to terrain relief.
+        Vertical exaggeration factor applied to terrain relief.  Forwarded to
+        the default processor when no explicit *processor* is supplied.
     target_size_mm:
-        If given, the longest XY dimension of every mesh is rescaled to
-        this value in millimetres.
+        If given, the longest XY dimension of every mesh is rescaled to this
+        value in millimetres.  Forwarded to the default processor when no
+        explicit *processor* is supplied.
+    processor:
+        :class:`~src.processors.base.MeshProcessor` instance used to convert
+        the elevation array into layer meshes.  When ``None``, each concrete
+        sub-class supplies a suitable default processor in its constructor.
+    output_writer:
+        :class:`~src.outputs.base.OutputWriter` instance used to persist the
+        generated meshes.  Defaults to
+        :class:`~src.outputs.layered_stl_output.LayeredSTLOutput` (three STL
+        files, or a ZIP archive when the path ends in ``.zip``).
     """
 
     def __init__(
@@ -48,10 +66,15 @@ class HoleGenerator(ABC):
         base_thickness: float = 3.0,
         z_scale: float = 1.5,
         target_size_mm: Optional[float] = None,
+        processor: Optional[MeshProcessor] = None,
+        output_writer: Optional[OutputWriter] = None,
     ) -> None:
         self.base_thickness = base_thickness
         self.z_scale = z_scale
         self.target_size_mm = target_size_mm
+        # processor may be None here; concrete sub-classes set a default in __init__
+        self.processor = processor
+        self.output_writer = output_writer or LayeredSTLOutput()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -66,7 +89,7 @@ class HoleGenerator(ABC):
         label: str = "",
         geometry=None,
     ) -> None:
-        """Run the full acquisition → mesh → export pipeline.
+        """Run the full acquisition → process → write pipeline.
 
         Parameters
         ----------
@@ -91,8 +114,9 @@ class HoleGenerator(ABC):
             lat, lon, buffer_m, geometry, label
         )
         self._log_grid(elevation)
-        meshes = self.build_meshes(elevation, transform)
-        self._export(meshes, output_path)
+        processor = self._get_processor()
+        meshes = processor.build_meshes(elevation, transform)
+        self.output_writer.write(meshes, output_path)
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -123,17 +147,25 @@ class HoleGenerator(ABC):
             Human-readable label for log messages.
         """
 
-    @abstractmethod
-    def build_meshes(
-        self,
-        elevation: np.ndarray,
-        transform: rasterio.transform.Affine,
-    ) -> dict:
-        """Build layer meshes from *elevation* and return a ``name → Trimesh`` dict."""
-
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    def _get_processor(self) -> MeshProcessor:
+        """Return the active :class:`~src.processors.base.MeshProcessor`.
+
+        If no processor was injected and the sub-class did not set one,
+        falls back to a :class:`~src.processors.gradient_processor.GradientMeshProcessor`
+        with this generator's mesh settings.
+        """
+        if self.processor is not None:
+            return self.processor
+        from ..processors.gradient_processor import GradientMeshProcessor
+        return GradientMeshProcessor(
+            base_thickness=self.base_thickness,
+            z_scale=self.z_scale,
+            target_size_mm=self.target_size_mm,
+        )
 
     def _make_mesh_generator(self) -> MeshGenerator:
         """Return a :class:`~src.mesh_generator.MeshGenerator` configured from this generator's settings."""
@@ -151,16 +183,3 @@ class HoleGenerator(ABC):
             f"  Elevation grid: {elevation.shape[0]}×{elevation.shape[1]}, "
             f"range [{elev_min:.1f} – {elev_max:.1f}]"
         )
-
-    def _export(self, meshes: dict, output_path: str) -> None:
-        """Write *meshes* to *output_path* (directory or ``.zip``)."""
-        exporter = Exporter()
-        if output_path.endswith(".zip"):
-            exporter.export_layers_to_zip(meshes, output_path)
-            click.echo(f"  ✓ Layers saved → {output_path}")
-        else:
-            exporter.export_layers_to_dir(meshes, output_path)
-            for name in meshes:
-                click.echo(
-                    f"  ✓ {name}.stl → {os.path.join(output_path, name + '.stl')}"
-                )
